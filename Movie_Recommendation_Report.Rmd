@@ -1,0 +1,451 @@
+---
+title: "Movie_Recommendation_Report"
+author: "Billy Tomaszewski"
+date: "5/13/2020"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    highlight: pygments
+    keep_tex: true
+    latex_engine: xelatex
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+```
+
+```{r, include=FALSE}
+options(tinytex.verbose = TRUE)
+```
+
+```{r isntall library}
+# Install libraries if not present
+if(!require(tidyverse)) install.packages("tidyverse") 
+if(!require(kableExtra)) install.packages("kableExtra")
+if(!require(tidyr)) install.packages("tidyr")
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(stringr)) install.packages("stringr")
+if(!require(forcats)) install.packages("forcats")
+if(!require(ggplot2)) install.packages("ggplot2")
+if(!require(ggplot2)) install.packages("lubridate")
+if(!require(ggplot2)) install.packages("googledrive")
+if(!require(ggplot2)) install.packages("caret")
+```
+
+```{r load libraries}
+# Loading all needed libraries
+library(dplyr)
+library(tidyverse)
+library(kableExtra)
+library(tidyr)
+library(stringr)
+library(forcats)
+library(ggplot2)
+library(lubridate)
+library(googledrive)
+library(caret)
+```
+# Overview
+
+This project is part of a series on Data Science in the HarvardX edX series. The purpose of this project is to practice exploratory data analysis, model generation and training, and report making. 
+
+## Introduction
+
+The purpose of this project is to use a publicly available large data set, to create a recommendation system. For this particular project we will be using movie databases and ratings given from individual users. By understanding how a user has previously rated certain movies, one can build a model to predict how the user would rate other movies. By determining which movies a user might rate highly, recommendations can be made. 
+
+In this project we will train a machine learning algorithm to predict user ratings from a training data set (called the edx data set) and then test the algorithm on a validation data set. 
+The goal will be to predict a users rating in the validation set that closely matches the users actual rating for a given movie. Successful prediction will be evaluated by Root Mean Square Error (```RMSE```). This metric serves to measure the difference between the predicted and actual values. The RMSE will be evaluated for several different models, with a lower RMSE indicating a more accurate prediction algorithm. The equation for RMSE prediction is as follows: 
+
+$$ RMSE = \sqrt{\frac{1}{N}\displaystyle\sum_{u,i} (\hat{y}_{u,i}-y_{u,i})^{2}} $$
+
+```{r RMSE_function}
+RMSE <- function(true_ratings = NULL, predicted_ratings = NULL) {
+    sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+## Data Overview
+
+The Movielens data was provided by the course instructors and can be downloaded. 
+
+```{r Loading in datasets}
+#Downloading and reading in datasets
+folder_url <- "https://drive.google.com/drive/folders/1IZcBBX0OmL9wu9AdzMBFUG8GoPbGQ38D"
+folder <- drive_get(as_id(folder_url))
+rdrfiles <- drive_ls(folder)
+walk(rdrfiles$id, ~ drive_download(as_id(.x),overwrite = T))
+
+edx <- readRDS("edx.rds")
+validation <- readRDS("validation.rds")
+```
+
+The data is in tidy format, and is split into ```edx``` (training) and ```validation``` sets. The validation set is 10% of the total data set to maximize the amount of data available for training the algorithm. The model development will utilize only the ```edx``` data set, and the ```validation``` set will only be used at the end to assess the performance of the algorithm. 
+
+We will begin to familiarize ourselves with the edx data set. 
+
+```{r counting}
+edx %>% summarize(Users = n_distinct(userId),
+              Movies = n_distinct(movieId)) %>% 
+kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+```
+
+These data contain nearly 70k unique users, who have rated 11k unique movies.
+
+**Searching for Missing Data**
+
+```{r NA search}
+sapply(edx, function(x) sum(is.na(x))) %>% 
+kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+```
+
+We also see here that there is no missing data, which is advantageous since addressing missing data is often a challenge in machine learning.
+
+These are the features in each column:
+
+- **userId** ```<integer>``` contains unique ID# for each user
+- **movieId** ```<numeric>``` contains unique ID# for each movie
+- **rating** ```<numeric>``` contains the rating of a movie by a user. Ratings are .5-5 with .5 increments
+- **timestamp** ```<integer>``` contains the timestamp for when the user rated a movie
+- **title** ```<character>``` contains the title of the movie that corresponds to the movieID as well as the year of release
+- **genres** ```<character>``` describes the genre or genres that the movie belongs to
+
+**Portion of edx data**
+
+```{r view data}
+head(edx) %>%
+   kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+```
+
+This gives you visual sense of how the data is laid out. 
+
+```{r rating distribution}
+edx %>%
+  ggplot(aes(rating)) +
+  geom_histogram(binwidth = 0.25, color = "black") +
+  ggtitle("Distribution of ratings")
+  
+```
+
+From this plot we see that ratings are generally right skewed, meaning that higher ratings are more common. We can also see from this plot that half start ratings are generally less common. 
+
+```{r Distribution of ratings per movie, fig.height=4, fig.width=5}
+edx %>%
+count(movieId) %>%
+ggplot(aes(n)) +
+geom_histogram(bins = 30, color = "black") +
+scale_x_log10() +
+xlab("# of ratings") +
+  ylab("# of movies") +
+ggtitle("Number of Ratings per Movie")
+```
+
+Here we see that not all movies are rated receive the same number of ratings. The movies that receive few ratings may be problematic for the algorithm because the amount of data for the individual movie is small.  
+
+```{r Table of obsure movies,fig.height=4, fig.width=5}
+edx %>%
+  group_by(movieId) %>%
+  summarize(count = n()) %>%
+  filter(count == 1) %>%
+  left_join(edx, by = "movieId") %>%
+  group_by(title) %>%
+  summarize(rating = rating, n_rating = count) %>%
+  slice(1:20) %>%
+  kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+  
+```
+
+Here we see that the movies that are infrequently rated, are often obscure. 
+
+In order to compensate for the effect these movies might have on the accuracy of our algorithm, we will apply a technique called regularization. This is done by applying a penalty to the error variable which minimizes the effect that movies that are sparsely reviewed have. Essentially, this adds extra uncertainty to movies that are rarely reviewed because there is not a big enough data set to confidently make a prediction. 
+
+```{r correaltion of rating and # rating per movie}
+edx %>% group_by(movieId) %>% summarise(n = n(), avgrat = mean(rating)) %>% 
+  arrange(desc(n)) %>% 
+  ggplot(aes(avgrat,n)) + geom_point()+ scale_y_continuous(trans = "log2")+ 
+  geom_smooth(method = lm) + ylab("#Ratings per movie") + 
+  xlab("Average rating per movie") + ggtitle("#Ratings vs. Avg. Rating")
+```
+This plot shows us that the number of times a movie is rated positively correlates with the average rating it receives. This suggests that movie itself, and perhaps its popularity, influence the rating it receives. 
+
+```{r distribution of avg user rating}
+edx %>% group_by(userId) %>% summarise(avg = mean(rating)) %>% 
+  arrange(desc(avg)) %>% 
+  ggplot(aes(avg)) + geom_histogram(bins = 10, binwidth = .25)+
+  xlab("Average Rating per User") + ylab("Frequency of rating")+
+  ggtitle("Frequency of Average Ratings Given by Users")
+
+edx %>% group_by(userId) %>% summarise(Avg_Rating = mean(rating)) %>% 
+  select(Avg_Rating) %>% summary(Avg_Rating) %>% kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+```
+This plot tells us that the average user gives a rating of ~3.5, but there are subsets of users that are very critical and on average have given all the movies they have rated a .5. The opposite is also true and some users give every movie they watch a 5. This suggests that we will have to account for user effects in our model. 
+
+# Method
+
+## Modelling Approach
+
+Here we describe the various models which attempt to maximize the accuracy of their prediction capability, and minimize their ``RMSE`` an error term which is calculated by: 
+
+$$ RMSE = \sqrt{\frac{1}{N}\displaystyle\sum_{u,i} (\hat{y}_{u,i}-y_{u,i})^{2}} $$
+In this equation y_hat represents our predicted rating that a user will give a movie, and y represents the actual rating that user gave. A ``RMSE`` of 1 indicates that our predictions are within are accurate to +/- 1. For this project we are expected to train an algorithm that produces a RMSE < **.86490**.
+
+In order to test the accuracy of our training set without using our validation set we will partition the edx data set.Where our ``test_set`` will be used to validate the models that are built on the ``train_set``. The ``test_set`` will be 20% of the edx data set.
+
+```{r breaking up edx into test and train}
+test_index <- createDataPartition(edx$rating,times = 1,p = .2,list = F)
+test_set <- data.frame(edx[test_index,])
+train_set <- data.frame(edx[-test_index,])
+
+test_set <- test_set %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+```
+
+### Average Movie Rating Model
+
+A simple model is one where we predict the same rating for all users. This represents a model where we assume 
+
+The formula for this model:
+
+$$ Y_{} = \mu + \epsilon_{} $$
+
+This model makes the assumption that all variation from the mean rating is random. Here $\mu$ is the mean of the data set, and $\epsilon$ is the error term which describes the random variability. 
+
+```{r find avg of train set}
+mu <- mean(train_set$rating)
+mu
+```
+
+When we predict our rating with $\mu$, we obtain the first RMSE:
+
+```{r naive_rmse}
+naive_rmse <- RMSE(mu,test_set$rating)
+naive_rmse
+```
+
+
+Here, we represent results table with the first RMSE:
+
+```{r rmse_results1}
+rmse_results <- data_frame(method = "Average movie rating model", RMSE = naive_rmse)
+rmse_results %>% kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+```
+
+This is our baseline RMSE, and as we previously mentioned, it is > 1 so our algorithm has not yet met the performance criteria. 
+
+In order to improve this we will incorporate insights from our exploratory data analysis and include more features in our model. 
+
+### Movie Effect Model
+To make our model more accurate, we will consider that the movie itself has an effect on the rating it receives. As we saw in our exploratory data analysis, movies which receive more ratings are often rated more highly. In order to account for this we will introduce a movie bias term, where ``b`` is the deviation of the average rating for an individual movie ``i`` from the average rating for all movies. The equation for our new model is:
+
+$$Y_{i} = \mu +b_{i}+ \epsilon_{i}$$
+```{r movie_predictions}
+movie_avgs <- train_set %>%
+  group_by(movieId) %>%
+  summarize(b_i = mean(rating - mu))
+
+predicted_ratings <- test_set %>%
+  left_join(movie_avgs, by='movieId') %>%
+  mutate(pred = mu + b_i) %>% 
+  pull(pred)
+
+predicted_ratings <- data.frame(rating = predicted_ratings)
+model_1_rmse <- RMSE(test_set$rating,predicted_ratings$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie effect model",  
+                                     RMSE = model_1_rmse ))
+rmse_results %>% kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+```
+
+This reduces our ``RMSE`` to **~.94**, and while it is great that we are now below 1, we still have a way to go in order to improve our accuracy to the necessary performance. 
+
+### Movie and User Effect Model
+This model aims to consider the parameters of both user and movie in making our prediction. As previously mentioned, there are users that give high ratings on average and users that give low ratings on average. We will include the bias of a given user in our model by introducing a bias term "b" for a given user "u". This gives us this new formula:
+
+$$Y_{u, i} = \mu + b_{i} + b_{u} + \epsilon_{u, i}$$
+
+In other words, this models a distribution centered at $\mu$ that deviates from that average because some movies are inherently more or less popular, some users are inherently more or less generous with their ratings, and a random sampling error $\epsilon$.
+
+```{r movie_user_predictions}
+user_avgs <- train_set %>%
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+predicted_ratings <- test_set%>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+model_2_rmse <- RMSE(predicted_ratings, test_set$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie and user effect model",  
+                                     RMSE = model_2_rmse))
+
+rmse_results %>% kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+
+```
+
+The RMSE is now **.865** which is just above where we need it before we can test on our ``validation`` data set. 
+
+### Regularization of Movie and User Effect Model
+
+In order to further reduce the RMSE we will apply regularization, to constrain the total variability of the effect sizes, using the term $\lambda$ (lambda). the new formula for our model is as follows:
+
+
+$$\frac{1}{N} \sum_{u,i} (y_{u,i} - \mu - b_{i} - b_{u})^{2} + \lambda (\sum_{i} b_{i}^2 + \sum_{i} b_{u}^2) $$   
+Here $b_{i}$ is influenced by movies with very few ratings $b_{u}$ and is influenced by users who only rated a small number of movies. The use of the regularization allows us to penalize these effects. We can treat $\lambda$ as a tuning parameter that allows us to minimize the RMSE.
+
+
+```{r lambdas}
+lambdas <- seq(0, 10, 0.25)
+rmses <- sapply(lambdas, function(l){
+  
+  mu <- mean(train_set$rating)
+  
+  b_i <- train_set %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- train_set %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  predicted_ratings <- 
+    test_set %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+  
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+```
+
+
+The below plot helps visualize how we minimize RMSE with different values of $\lambda$.
+
+```{r plot_lambdas}
+qplot(lambdas, rmses)  
+```
+
+Our value of $\lambda$ which minimizes RMSE is:
+
+```{r min_lambda}
+  lambda <- lambdas[which.min(rmses)]
+lambda
+```
+
+For the full model, the optimal lambda is: **4.75**
+
+The new RMSE for our model is: **.8648**
+
+
+```{r rmse_results3}
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Regularized movie and user effect model",  
+                                     RMSE = min(rmses)))
+rmse_results %>% kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+```
+
+Now we can test if our trained model will perform the same on our ``validation`` data set.
+
+```{r validation set RMSE calculation}
+l <- lambda
+
+mu <- mean(edx$rating)
+  
+  b_i <- edx %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- edx %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+
+predicted_ratings <- 
+    validation %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+  
+ validation_RMSE <- RMSE(predicted_ratings, validation$rating)
+ rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Final RMSE on Validation Data set",  
+                                     RMSE = validation_RMSE))
+rmse_results %>% kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+```
+
+The final RMSE for the validation data set is **.8648**, which is <**.86490**, indicating we have successfully met the accuracy performance requirement. 
+
+# Results and Discussion
+
+The results from our models are below: 
+
+```{r final model table}
+rmse_results %>% kable() %>%
+   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE)
+```
+Using our Regularized User and Movie model, we were able to accurately predict user ratings. 
+
+The final using this model on the validation data set is **.8648**, which is <**.86490**, indicating we have successfully met the accuracy performance requirement. 
+
+# Conclusion
+In conclusion, we have built a machine learning algorithm which accurately predicts ratings given by users. This was accomplished by utilizing the publicly available MovieLens data set, and sub-setting it into training and validation partitions. The training subset of the data was further partitioned so that tuning parameters could be optimized without using the validation data set, so as to avoid over-fitting. After assessing the accuracy of multiple different models using the training data set, it was determined that the Regularized User and Movie model would be the most accurate. I then applied this model to the validation data set to determine the final accuracy estimate. The error in this model was determined to be less than that was required indicating successful completion of the project. 
+
+This model could likely be further improved by including other parameters (time of day,time of year,year, genre), or by using more sophisticated machine learning algorithms (knn, neural network, etc.).
+
+# Appendix
+## Environment 
+
+```{r, echo=FALSE}
+version
+```
